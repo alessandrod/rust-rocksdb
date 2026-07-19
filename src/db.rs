@@ -219,7 +219,7 @@ impl<T: ThreadMode, D: DBInner> DBAccess for DBCommon<T, D> {
     }
 
     unsafe fn create_iterator(&self, readopts: &ReadOptions) -> *mut ffi::rocksdb_iterator_t {
-        unsafe { ffi::rocksdb_create_iterator(self.inner.inner(), readopts.inner) }
+        unsafe { ffi::rocksdb_create_iterator(self.inner.inner(), readopts.inner()) }
     }
 
     unsafe fn create_iterator_cf(
@@ -227,7 +227,7 @@ impl<T: ThreadMode, D: DBInner> DBAccess for DBCommon<T, D> {
         cf_handle: *mut ffi::rocksdb_column_family_handle_t,
         readopts: &ReadOptions,
     ) -> *mut ffi::rocksdb_iterator_t {
-        unsafe { ffi::rocksdb_create_iterator_cf(self.inner.inner(), readopts.inner, cf_handle) }
+        unsafe { ffi::rocksdb_create_iterator_cf(self.inner.inner(), readopts.inner(), cf_handle) }
     }
 
     fn get_opt<K: AsRef<[u8]>>(
@@ -1043,7 +1043,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         key: K,
         readopts: &ReadOptions,
     ) -> Result<Option<DBPinnableSlice>, Error> {
-        if readopts.inner.is_null() {
+        if readopts.inner().is_null() {
             return Err(Error::new(
                 "Unable to create RocksDB read options. This is a fairly trivial call, and its \
                  failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
@@ -1055,7 +1055,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             let val = ffi_try!(ffi::rocksdb_get_pinned(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 key.as_ptr() as *const c_char,
                 key.len() as size_t,
             ));
@@ -1065,6 +1065,49 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
                 Ok(Some(DBPinnableSlice::from_c(val)))
             }
         }
+    }
+
+    /// Creates an empty pinnable slice that can be reused by pinned get operations.
+    pub fn new_pinnable_slice(&self) -> DBPinnableSlice<'_> {
+        unsafe { DBPinnableSlice::new() }
+    }
+
+    /// Reads a value into a reusable pinnable slice using the supplied read options.
+    ///
+    /// Returns `true` when the key was found. On `false`, `value` is empty.
+    pub fn get_pinned_opt_into<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        readopts: &ReadOptions,
+        value: &mut DBPinnableSlice<'_>,
+    ) -> Result<bool, Error> {
+        if readopts.inner().is_null() {
+            return Err(Error::new(
+                "Unable to create RocksDB read options. This is a fairly trivial call, and its \
+                 failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
+                    .to_owned(),
+            ));
+        }
+        let key = key.as_ref();
+        unsafe {
+            let found = ffi_try!(ffi::rocksdb_get_pinned_into(
+                self.inner.inner(),
+                readopts.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_mut_ptr(),
+            ));
+            Ok(found != 0)
+        }
+    }
+
+    /// Reads a value into a reusable pinnable slice using default read options.
+    pub fn get_pinned_into<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        value: &mut DBPinnableSlice<'_>,
+    ) -> Result<bool, Error> {
+        self.get_pinned_opt_into(key, &ReadOptions::default(), value)
     }
 
     /// Return the value associated with a key using RocksDB's PinnableSlice
@@ -1083,7 +1126,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         key: K,
         readopts: &ReadOptions,
     ) -> Result<Option<DBPinnableSlice>, Error> {
-        if readopts.inner.is_null() {
+        if readopts.inner().is_null() {
             return Err(Error::new(
                 "Unable to create RocksDB read options. This is a fairly trivial call, and its \
                  failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
@@ -1095,7 +1138,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             let val = ffi_try!(ffi::rocksdb_get_pinned_cf(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 cf.inner(),
                 key.as_ptr() as *const c_char,
                 key.len() as size_t,
@@ -1106,6 +1149,49 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
                 Ok(Some(DBPinnableSlice::from_c(val)))
             }
         }
+    }
+
+    /// Reads a column-family value into a reusable pinnable slice using the
+    /// supplied read options.
+    ///
+    /// Returns `true` when the key was found. On `false`, `value` is empty.
+    pub fn get_pinned_cf_opt_into<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+        value: &mut DBPinnableSlice<'_>,
+    ) -> Result<bool, Error> {
+        if readopts.inner().is_null() {
+            return Err(Error::new(
+                "Unable to create RocksDB read options. This is a fairly trivial call, and its \
+                 failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
+                    .to_owned(),
+            ));
+        }
+        let key = key.as_ref();
+        unsafe {
+            let found = ffi_try!(ffi::rocksdb_get_pinned_cf_into(
+                self.inner.inner(),
+                readopts.inner(),
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_mut_ptr(),
+            ));
+            Ok(found != 0)
+        }
+    }
+
+    /// Reads a column-family value into a reusable pinnable slice using default
+    /// read options.
+    pub fn get_pinned_cf_into<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        value: &mut DBPinnableSlice<'_>,
+    ) -> Result<bool, Error> {
+        self.get_pinned_cf_opt_into(cf, key, &ReadOptions::default(), value)
     }
 
     /// Return the value associated with a key using RocksDB's PinnableSlice
@@ -1153,7 +1239,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             ffi::rocksdb_multi_get(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 ptr_keys.len(),
                 ptr_keys.as_ptr(),
                 keys_sizes.as_ptr(),
@@ -1212,7 +1298,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             ffi::rocksdb_multi_get_cf(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 ptr_cfs.as_ptr(),
                 ptr_keys.len(),
                 ptr_keys.as_ptr(),
@@ -1270,7 +1356,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             ffi::rocksdb_batched_multi_get_cf(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 cf.inner(),
                 ptr_keys.len(),
                 ptr_keys.as_ptr(),
@@ -1310,7 +1396,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         unsafe {
             0 != ffi::rocksdb_key_may_exist(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 key.as_ptr() as *const c_char,
                 key.len() as size_t,
                 ptr::null_mut(), /*value*/
@@ -1340,7 +1426,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         0 != unsafe {
             ffi::rocksdb_key_may_exist_cf(
                 self.inner.inner(),
-                readopts.inner,
+                readopts.inner(),
                 cf.inner(),
                 key.as_ptr() as *const c_char,
                 key.len() as size_t,
@@ -1373,7 +1459,7 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
             != unsafe {
                 ffi::rocksdb_key_may_exist_cf(
                     self.inner.inner(),
-                    readopts.inner,
+                    readopts.inner(),
                     cf.inner(),
                     key.as_ptr() as *const c_char,
                     key.len() as size_t,

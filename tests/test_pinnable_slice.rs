@@ -62,3 +62,58 @@ fn test_snapshot_pinnable_slice() {
 
     assert_eq!(b"12345", &pinnable_slice[5..10]);
 }
+
+#[test]
+fn test_reusable_pinnable_slice() {
+    let path = DBPath::new("_rust_rocksdb_reusable_pinnable_slice_test");
+
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    let db = DB::open(&opts, &path).unwrap();
+
+    db.put(b"short", b"value").unwrap();
+    db.put(b"long", b"a considerably longer value").unwrap();
+
+    let mut value = db.new_pinnable_slice();
+    assert!(value.is_empty());
+
+    assert!(db.get_pinned_into(b"short", &mut value).unwrap());
+    assert_eq!(b"value", value.as_ref());
+
+    assert!(db.get_pinned_into(b"long", &mut value).unwrap());
+    assert_eq!(b"a considerably longer value", value.as_ref());
+
+    assert!(!db.get_pinned_into(b"missing", &mut value).unwrap());
+    assert!(value.is_empty());
+
+    db.flush().unwrap();
+    assert!(db.get_pinned_into(b"short", &mut value).unwrap());
+    assert_eq!(b"value", value.as_ref());
+
+    value.reset();
+    assert!(value.is_empty());
+
+    let mut value = db.get_pinned(b"short").unwrap().unwrap();
+    assert!(db.get_pinned_into(b"long", &mut value).unwrap());
+    assert_eq!(b"a considerably longer value", value.as_ref());
+}
+
+#[test]
+fn test_reusable_pinnable_slice_column_family() {
+    let path = DBPath::new("_rust_rocksdb_reusable_pinnable_slice_cf_test");
+
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let db = DB::open_cf(&opts, &path, ["cf"]).unwrap();
+    let cf = db.cf_handle("cf").unwrap();
+
+    db.put_cf(cf, b"key", b"value").unwrap();
+    let mut value = db.new_pinnable_slice();
+
+    assert!(db.get_pinned_cf_into(cf, b"key", &mut value).unwrap());
+    assert_eq!(b"value", value.as_ref());
+
+    assert!(!db.get_pinned_cf_into(cf, b"missing", &mut value).unwrap());
+    assert!(value.is_empty());
+}

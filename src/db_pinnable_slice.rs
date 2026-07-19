@@ -59,6 +59,28 @@ impl Drop for DBPinnableSlice<'_> {
 }
 
 impl DBPinnableSlice<'_> {
+    /// Releases any pinned RocksDB resources and clears the current value.
+    ///
+    /// Capacity reserved for a copied value is retained for reuse by a subsequent
+    /// `get_pinned_into` operation.
+    pub fn reset(&mut self) {
+        unsafe {
+            ffi::rocksdb_pinnableslice_reset(self.ptr);
+        }
+    }
+
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut ffi::rocksdb_pinnableslice_t {
+        self.ptr
+    }
+
+    /// Creates an empty pinnable slice.
+    pub(crate) unsafe fn new() -> Self {
+        Self {
+            ptr: unsafe { ffi::rocksdb_pinnableslice_create() },
+            db: PhantomData,
+        }
+    }
+
     /// Used to wrap a PinnableSlice from rocksdb to avoid unnecessary memcpy
     ///
     /// # Unsafe
