@@ -16,7 +16,7 @@ use std::ffi::CStr;
 use std::path::Path;
 use std::ptr::{null_mut, NonNull};
 use std::slice;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use libc::{self, c_char, c_double, c_int, c_uchar, c_uint, c_void, size_t};
 
@@ -39,6 +39,8 @@ use crate::{
     statistics::Ticker,
     ColumnFamilyDescriptor, Error, SnapshotWithThreadMode,
 };
+
+static DEFAULT_READ_OPTIONS: LazyLock<RawReadOptions> = LazyLock::new(RawReadOptions::new);
 
 pub(crate) struct WriteBufferManagerWrapper {
     pub(crate) inner: NonNull<ffi::rocksdb_write_buffer_manager_t>,
@@ -361,8 +363,56 @@ pub struct BlockBasedOptions {
     outlive: BlockBasedOptionsMustOutliveDB,
 }
 
+struct RawReadOptions(*mut ffi::rocksdb_readoptions_t);
+
+impl RawReadOptions {
+    fn new() -> Self {
+        Self(unsafe { ffi::rocksdb_readoptions_create() })
+    }
+
+    fn as_ptr(&self) -> *const ffi::rocksdb_readoptions_t {
+        self.0
+    }
+}
+
+impl Drop for RawReadOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_readoptions_destroy(self.0);
+        }
+    }
+}
+
+unsafe impl Send for RawReadOptions {}
+unsafe impl Sync for RawReadOptions {}
+
+enum ReadOptionsInner {
+    SharedDefault(&'static RawReadOptions),
+    Owned(RawReadOptions),
+}
+
+impl ReadOptionsInner {
+    fn as_ptr(&self) -> *const ffi::rocksdb_readoptions_t {
+        match self {
+            Self::SharedDefault(inner) => inner.as_ptr(),
+            Self::Owned(inner) => inner.as_ptr(),
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut ffi::rocksdb_readoptions_t {
+        if matches!(self, Self::SharedDefault(_)) {
+            *self = Self::Owned(RawReadOptions::new());
+        }
+
+        match self {
+            Self::Owned(inner) => inner.0,
+            Self::SharedDefault(_) => unreachable!(),
+        }
+    }
+}
+
 pub struct ReadOptions {
-    pub(crate) inner: *mut ffi::rocksdb_readoptions_t,
+    inner: ReadOptionsInner,
     // The `ReadOptions` owns a copy of the timestamp and iteration bounds.
     // This is necessary to ensure the pointers we pass over the FFI live as
     // long as the `ReadOptions`. This way, when performing the read operation,
@@ -499,14 +549,6 @@ impl Drop for LruCacheOptions {
     fn drop(&mut self) {
         unsafe {
             ffi::rocksdb_lru_cache_options_destroy(self.inner);
-        }
-    }
-}
-
-impl Drop for ReadOptions {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::rocksdb_readoptions_destroy(self.inner);
         }
     }
 }
@@ -3893,6 +3935,14 @@ pub enum CompactionPri {
 }
 
 impl ReadOptions {
+    pub(crate) fn inner(&self) -> *const ffi::rocksdb_readoptions_t {
+        self.inner.as_ptr()
+    }
+
+    fn inner_mut(&mut self) -> *mut ffi::rocksdb_readoptions_t {
+        self.inner.as_mut_ptr()
+    }
+
     // TODO add snapshot setting here
     // TODO add snapshot wrapper structs with proper destructors;
     // that struct needs an "iterator" impl too.
@@ -3904,7 +3954,7 @@ impl ReadOptions {
     /// Default: true
     pub fn fill_cache(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_fill_cache(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_fill_cache(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -3913,7 +3963,7 @@ impl ReadOptions {
     /// not have been released.
     pub fn set_snapshot<D: DBAccess>(&mut self, snapshot: &SnapshotWithThreadMode<D>) {
         unsafe {
-            ffi::rocksdb_readoptions_set_snapshot(self.inner, snapshot.inner);
+            ffi::rocksdb_readoptions_set_snapshot(self.inner_mut(), snapshot.inner);
         }
     }
 
@@ -3979,7 +4029,7 @@ impl ReadOptions {
         };
         self.iterate_lower_bound = bound;
         unsafe {
-            ffi::rocksdb_readoptions_set_iterate_lower_bound(self.inner, ptr, len);
+            ffi::rocksdb_readoptions_set_iterate_lower_bound(self.inner_mut(), ptr, len);
         }
     }
 
@@ -3993,7 +4043,7 @@ impl ReadOptions {
         };
         self.iterate_upper_bound = bound;
         unsafe {
-            ffi::rocksdb_readoptions_set_iterate_upper_bound(self.inner, ptr, len);
+            ffi::rocksdb_readoptions_set_iterate_upper_bound(self.inner_mut(), ptr, len);
         }
     }
 
@@ -4004,7 +4054,7 @@ impl ReadOptions {
     /// Default: ::All
     pub fn set_read_tier(&mut self, tier: ReadTier) {
         unsafe {
-            ffi::rocksdb_readoptions_set_read_tier(self.inner, tier as c_int);
+            ffi::rocksdb_readoptions_set_read_tier(self.inner_mut(), tier as c_int);
         }
     }
 
@@ -4018,7 +4068,7 @@ impl ReadOptions {
     /// Default: false
     pub fn set_prefix_same_as_start(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_prefix_same_as_start(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_prefix_same_as_start(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4031,7 +4081,7 @@ impl ReadOptions {
     /// changing implementation of prefix extractor.
     pub fn set_total_order_seek(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_total_order_seek(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_total_order_seek(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4042,7 +4092,7 @@ impl ReadOptions {
     /// Default: 0
     pub fn set_max_skippable_internal_keys(&mut self, num: u64) {
         unsafe {
-            ffi::rocksdb_readoptions_set_max_skippable_internal_keys(self.inner, num);
+            ffi::rocksdb_readoptions_set_max_skippable_internal_keys(self.inner_mut(), num);
         }
     }
 
@@ -4053,7 +4103,7 @@ impl ReadOptions {
     pub fn set_background_purge_on_iterator_cleanup(&mut self, v: bool) {
         unsafe {
             ffi::rocksdb_readoptions_set_background_purge_on_iterator_cleanup(
-                self.inner,
+                self.inner_mut(),
                 c_uchar::from(v),
             );
         }
@@ -4068,7 +4118,7 @@ impl ReadOptions {
     )]
     pub fn set_ignore_range_deletions(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_ignore_range_deletions(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_ignore_range_deletions(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4078,7 +4128,7 @@ impl ReadOptions {
     /// Default: true
     pub fn set_verify_checksums(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_verify_checksums(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_verify_checksums(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4095,7 +4145,7 @@ impl ReadOptions {
     /// ```
     pub fn set_readahead_size(&mut self, v: usize) {
         unsafe {
-            ffi::rocksdb_readoptions_set_readahead_size(self.inner, v as size_t);
+            ffi::rocksdb_readoptions_set_readahead_size(self.inner_mut(), v as size_t);
         }
     }
 
@@ -4111,7 +4161,7 @@ impl ReadOptions {
     /// Default: true
     pub fn set_auto_readahead_size(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_auto_readahead_size(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_auto_readahead_size(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4120,7 +4170,7 @@ impl ReadOptions {
     /// or seek_to_last are not supported.
     pub fn set_tailing(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_tailing(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_tailing(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4134,7 +4184,7 @@ impl ReadOptions {
     /// Default: false
     pub fn set_pin_data(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_pin_data(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_pin_data(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4145,7 +4195,7 @@ impl ReadOptions {
     /// Default: `false`
     pub fn set_async_io(&mut self, v: bool) {
         unsafe {
-            ffi::rocksdb_readoptions_set_async_io(self.inner, c_uchar::from(v));
+            ffi::rocksdb_readoptions_set_async_io(self.inner_mut(), c_uchar::from(v));
         }
     }
 
@@ -4176,7 +4226,7 @@ impl ReadOptions {
         };
         self.timestamp = ts;
         unsafe {
-            ffi::rocksdb_readoptions_set_timestamp(self.inner, ptr, len);
+            ffi::rocksdb_readoptions_set_timestamp(self.inner_mut(), ptr, len);
         }
     }
 
@@ -4195,21 +4245,19 @@ impl ReadOptions {
         };
         self.iter_start_ts = ts;
         unsafe {
-            ffi::rocksdb_readoptions_set_iter_start_ts(self.inner, ptr, len);
+            ffi::rocksdb_readoptions_set_iter_start_ts(self.inner_mut(), ptr, len);
         }
     }
 }
 
 impl Default for ReadOptions {
     fn default() -> Self {
-        unsafe {
-            Self {
-                inner: ffi::rocksdb_readoptions_create(),
-                timestamp: None,
-                iter_start_ts: None,
-                iterate_upper_bound: None,
-                iterate_lower_bound: None,
-            }
+        Self {
+            inner: ReadOptionsInner::SharedDefault(&DEFAULT_READ_OPTIONS),
+            timestamp: None,
+            iter_start_ts: None,
+            iterate_upper_bound: None,
+            iterate_lower_bound: None,
         }
     }
 }
@@ -4750,8 +4798,34 @@ impl Drop for DBPath {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_options::WriteBufferManager;
-    use crate::{Cache, CompactionPri, MemtableFactory, Options};
+    use crate::db_options::{ReadOptions, WriteBufferManager};
+    use crate::{ffi, Cache, CompactionPri, MemtableFactory, Options};
+
+    #[test]
+    fn read_options_default_is_shared_until_mutated() {
+        let default = ReadOptions::default();
+        let mut options = ReadOptions::default();
+
+        assert_eq!(default.inner(), options.inner());
+
+        // this triggers cow
+        options.fill_cache(false);
+
+        assert_ne!(default.inner(), options.inner());
+        assert_eq!(
+            unsafe { ffi::rocksdb_readoptions_get_fill_cache(default.inner().cast_mut()) },
+            1
+        );
+        assert_eq!(
+            unsafe { ffi::rocksdb_readoptions_get_fill_cache(options.inner().cast_mut()) },
+            0
+        );
+
+        // cow happens once
+        let inner = options.inner();
+        options.set_total_order_seek(true);
+        assert_eq!(inner, options.inner());
+    }
 
     #[test]
     fn test_enable_statistics() {
