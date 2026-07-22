@@ -1067,6 +1067,54 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
         }
     }
 
+    /// Creates an empty pinnable slice for reuse by pinned get operations.
+    pub fn new_pinnable_slice(&self) -> DBPinnableSlice<'_> {
+        unsafe { DBPinnableSlice::from_c(ffi::rocksdb_pinnableslice_create()) }
+    }
+
+    /// Reads a value into a reusable pinnable slice with the given read options.
+    ///
+    /// Returns `true` if the key was found. If the key was not found, returns
+    /// `false` and leaves `value` empty.
+    pub fn get_pinned_opt_into<'db, K: AsRef<[u8]>>(
+        &'db self,
+        key: K,
+        readopts: &ReadOptions,
+        value: &mut DBPinnableSlice<'db>,
+    ) -> Result<bool, Error> {
+        if readopts.inner().is_null() {
+            return Err(Error::new(
+                "Unable to create RocksDB read options. This is a fairly trivial call, and its \
+                 failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
+                    .to_owned(),
+            ));
+        }
+
+        let key = key.as_ref();
+        unsafe {
+            let found = ffi_try!(ffi::rocksdb_get_pinned_into(
+                self.inner.inner(),
+                readopts.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_mut_ptr(),
+            ));
+            Ok(found != 0)
+        }
+    }
+
+    /// Reads a value into a reusable pinnable slice with default read options.
+    ///
+    /// Returns `true` if the key was found. If the key was not found, returns
+    /// `false` and leaves `value` empty.
+    pub fn get_pinned_into<'db, K: AsRef<[u8]>>(
+        &'db self,
+        key: K,
+        value: &mut DBPinnableSlice<'db>,
+    ) -> Result<bool, Error> {
+        self.get_pinned_opt_into(key, &ReadOptions::default(), value)
+    }
+
     /// Return the value associated with a key using RocksDB's PinnableSlice
     /// so as to avoid unnecessary memory copy. Similar to get_pinned_opt but
     /// leverages default options.
@@ -1106,6 +1154,54 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
                 Ok(Some(DBPinnableSlice::from_c(val)))
             }
         }
+    }
+
+    /// Reads a column-family value into a reusable pinnable slice with the
+    /// given read options.
+    ///
+    /// Returns `true` if the key was found. If the key was not found, returns
+    /// `false` and leaves `value` empty.
+    pub fn get_pinned_cf_opt_into<'db, K: AsRef<[u8]>>(
+        &'db self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+        value: &mut DBPinnableSlice<'db>,
+    ) -> Result<bool, Error> {
+        if readopts.inner().is_null() {
+            return Err(Error::new(
+                "Unable to create RocksDB read options. This is a fairly trivial call, and its \
+                 failure may be indicative of a mis-compiled or mis-loaded RocksDB library."
+                    .to_owned(),
+            ));
+        }
+
+        let key = key.as_ref();
+        unsafe {
+            let found = ffi_try!(ffi::rocksdb_get_pinned_cf_into(
+                self.inner.inner(),
+                readopts.inner(),
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_mut_ptr(),
+            ));
+            Ok(found != 0)
+        }
+    }
+
+    /// Reads a column-family value into a reusable pinnable slice with default
+    /// read options.
+    ///
+    /// Returns `true` if the key was found. If the key was not found, returns
+    /// `false` and leaves `value` empty.
+    pub fn get_pinned_cf_into<'db, K: AsRef<[u8]>>(
+        &'db self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        value: &mut DBPinnableSlice<'db>,
+    ) -> Result<bool, Error> {
+        self.get_pinned_cf_opt_into(cf, key, &ReadOptions::default(), value)
     }
 
     /// Return the value associated with a key using RocksDB's PinnableSlice
